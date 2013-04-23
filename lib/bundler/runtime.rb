@@ -4,6 +4,12 @@ module Bundler
   class Runtime < Environment
     include SharedHelpers
 
+    attr_writer :profiling
+
+    def profiling
+      @profiling ||= false
+    end
+
     def setup(*groups)
       groups.map! { |g| g.to_sym }
 
@@ -55,6 +61,7 @@ module Bundler
     def require(*groups)
       groups.map! { |g| g.to_sym }
       groups = [:default] if groups.empty?
+      start_all = Time.now
 
       @definition.dependencies.each do |dep|
         # Skip the dependency if it is not in any of the requested
@@ -62,6 +69,7 @@ module Bundler
         next unless ((dep.groups & groups).any? && dep.current_platform?)
 
         required_file = nil
+        start = nil
 
         begin
           # Loop through all the specified autorequires for the
@@ -69,7 +77,9 @@ module Bundler
           # as the autorequire.
           Array(dep.autorequire || dep.name).each do |file|
             required_file = file
+            start = Time.now if profiling
             Kernel.require file
+            dump_profile file, start
           end
         rescue LoadError => e
           REGEXPS.find { |r| r =~ e.message }
@@ -79,15 +89,23 @@ module Bundler
             begin
               namespaced_file = dep.name.gsub('-', '/')
               Kernel.require namespaced_file
+              dump_profile required_file, start, :load_error => true
             rescue LoadError
+              dump_profile required_file, start, :load_error => true
               REGEXPS.find { |r| r =~ e.message }
               regex_name = $1
               raise e if dep.autorequire || (regex_name && regex_name.gsub('-', '/') != namespaced_file)
               raise e if regex_name.nil?
             end
+          else
+            dump_profile required_file, start, :load_error => true
+            REGEXPS.find { |r| r =~ e.message }
+            raise if dep.autorequire || $1 != required_file
           end
         end
       end
+
+      dump_profile "Total time to require all gems", start_all, :total => true
     end
 
     def dependencies_for(*groups)
@@ -294,6 +312,14 @@ module Bundler
 
     def cache_path
       root.join("vendor/cache")
+    end
+
+    def dump_profile(required_file, start, options={})
+      if profiling
+        load_error = ' (LoadError)' if options[:load_error]
+        message_type = options[:total] ? :confirm : :info
+        Bundler.ui.send message_type, "#{"%10dms" % ((Time.now - start) * 1000)} #{required_file}#{load_error}"
+      end
     end
   end
 end
